@@ -25,9 +25,11 @@ NAME="${2:?usage: run_pruneonly.sh <checkpoint_dir> <run_name> [gpu_id]}"
 GPU="${3:-0}"
 
 PORT=8080
-TASKS="hellaswag,arc_challenge,winogrande,truthfulqa_mc2"
+TASKS="${TASKS:-hellaswag,arc_challenge,winogrande,truthfulqa_mc2}"
 WANDB_PROJECT="magisterka-pruning"
 RESULTS_DIR="/workspace/results/pruneonly"
+NUM_CONCURRENT="${NUM_CONCURRENT:-4}"   # niżej = stabilniej (8 dawało TimeoutError pod obciążeniem)
+MAX_INPUT_LEN="${MAX_INPUT_LEN:-8192}"  # 4096 ucinał długie prompty TruthfulQA -> zacięcie serwera
 # Osobny cache datasetów dla kontenera — host (inna wersja `datasets`) psuje wspólny cache.
 export HF_DATASETS_CACHE="/workspace/hf_datasets_cache_container"
 
@@ -43,7 +45,7 @@ sleep 3
 DEPLOY_LOG="$RESULTS_DIR/deploy_${NAME}.log"
 echo ">> deploy $NAME (gpu $GPU) -> $DEPLOY_LOG"
 CUDA_VISIBLE_DEVICES="$GPU" nohup python -c \
-  "from nemo.collections.llm import deploy; deploy(nemo_checkpoint='${CKPT}', num_gpus=1, legacy_ckpt=True)" \
+  "from nemo.collections.llm import deploy; deploy(nemo_checkpoint='${CKPT}', num_gpus=1, legacy_ckpt=True, max_input_len=${MAX_INPUT_LEN})" \
   > "$DEPLOY_LOG" 2>&1 &
 DEPLOY_PID=$!
 
@@ -59,12 +61,20 @@ for _ in $(seq 1 120); do
 done
 grep -q "Application startup complete" "$DEPLOY_LOG" || { echo "!! timeout na deploy"; exit 1; }
 
-# --- 3. eval przez endpoint (loglikelihood + wandb) ---
-echo ">> eval $NAME: $TASKS"
+# --- 3. eval przez endpoint (loglikelihood + opcjonalne wandb) ---
+# wandb tylko jeśli klucz ustawiony — inaczej eval leci bez logowania (zamiast crashować).
+WANDB_ARGS=()
+if [ -n "${WANDB_API_KEY:-}" ]; then
+  WANDB_ARGS=(--wandb_args "project=${WANDB_PROJECT},name=${NAME}")
+else
+  echo "!! WANDB_API_KEY nie ustawiony — eval BEZ logowania do wandb"
+fi
+
+echo ">> eval $NAME: $TASKS (concurrent=$NUM_CONCURRENT)"
 PYTHONUNBUFFERED=1 lm_eval --model local-completions \
-  --model_args "model=triton_model,base_url=http://0.0.0.0:${PORT}/v1/completions/,tokenizer_backend=huggingface,tokenizer=${CKPT}/context/nemo_tokenizer,num_concurrent=8,max_retries=1,tokenized_requests=False" \
+  --model_args "model=triton_model,base_url=http://0.0.0.0:${PORT}/v1/completions/,tokenizer_backend=huggingface,tokenizer=${CKPT}/context/nemo_tokenizer,num_concurrent=${NUM_CONCURRENT},max_retries=5,tokenized_requests=False" \
   --tasks "$TASKS" \
-  --wandb_args "project=${WANDB_PROJECT},name=${NAME}" \
+  "${WANDB_ARGS[@]}" \
   --output_path "$RESULTS_DIR/native_suite_${NAME}" \
   2>&1 | tee "$RESULTS_DIR/native_suite_${NAME}.log"
 
