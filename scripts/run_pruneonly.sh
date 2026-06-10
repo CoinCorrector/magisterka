@@ -28,8 +28,8 @@ PORT=8080
 TASKS="${TASKS:-hellaswag,arc_challenge,winogrande,truthfulqa_mc2}"
 WANDB_PROJECT="magisterka-pruning"
 RESULTS_DIR="/workspace/results/pruneonly"
-NUM_CONCURRENT="${NUM_CONCURRENT:-4}"   # niżej = stabilniej (8 dawało TimeoutError pod obciążeniem)
-MAX_INPUT_LEN="${MAX_INPUT_LEN:-8192}"  # 4096 ucinał długie prompty TruthfulQA -> zacięcie serwera
+NUM_CONCURRENT="${NUM_CONCURRENT:-8}"   # per-task największe to hellaswag ~40k zapytań — OK przy 8
+MAX_INPUT_LEN="${MAX_INPUT_LEN:-8192}"  # zapas na długie prompty (TruthfulQA)
 # Osobny cache datasetów dla kontenera — host (inna wersja `datasets`) psuje wspólny cache.
 export HF_DATASETS_CACHE="/workspace/hf_datasets_cache_container"
 
@@ -61,21 +61,30 @@ for _ in $(seq 1 120); do
 done
 grep -q "Application startup complete" "$DEPLOY_LOG" || { echo "!! timeout na deploy"; exit 1; }
 
-# --- 3. eval przez endpoint (loglikelihood + opcjonalne wandb) ---
-# wandb tylko jeśli klucz ustawiony — inaczej eval leci bez logowania (zamiast crashować).
-WANDB_ARGS=()
-if [ -n "${WANDB_API_KEY:-}" ]; then
-  WANDB_ARGS=(--wandb_args "project=${WANDB_PROJECT},name=${NAME}")
-else
-  echo "!! WANDB_API_KEY nie ustawiony — eval BEZ logowania do wandb"
-fi
-
-echo ">> eval $NAME: $TASKS (concurrent=$NUM_CONCURRENT)"
-PYTHONUNBUFFERED=1 lm_eval --model local-completions \
-  --model_args "model=triton_model,base_url=http://0.0.0.0:${PORT}/v1/completions/,tokenizer_backend=huggingface,tokenizer=${CKPT}/context/nemo_tokenizer,num_concurrent=${NUM_CONCURRENT},max_retries=5,tokenized_requests=False" \
-  --tasks "$TASKS" \
-  "${WANDB_ARGS[@]}" \
-  --output_path "$RESULTS_DIR/native_suite_${NAME}" \
-  2>&1 | tee "$RESULTS_DIR/native_suite_${NAME}.log"
+# --- 3. eval PER-TASK (osobne wywołanie lm_eval na zadanie) ---
+# Jedna długa sesja aiohttp (~53k zapytań) degraduje się i pada na TimeoutError ~90%.
+# Osobne wywołania = świeża pula połączeń na zadanie; deploy zostaje wspólny. Błąd jednego
+# zadania nie ubija reszty (|| w pętli). wandb opcjonalne, grupowane per model.
+[ -n "${WANDB_API_KEY:-}" ] || echo "!! WANDB_API_KEY nie ustawiony — eval BEZ logowania do wandb"
+echo ">> eval $NAME per-task (concurrent=$NUM_CONCURRENT): $TASKS"
+IFS=',' read -ra TASK_ARR <<< "$TASKS"
+FAILED=()
+for task in "${TASK_ARR[@]}"; do
+  echo ">> --- $task ---"
+  WANDB_ARGS=()
+  [ -n "${WANDB_API_KEY:-}" ] && WANDB_ARGS=(--wandb_args "project=${WANDB_PROJECT},group=${NAME},name=${NAME}-${task}")
+  if PYTHONUNBUFFERED=1 lm_eval --model local-completions \
+      --model_args "model=triton_model,base_url=http://0.0.0.0:${PORT}/v1/completions/,tokenizer_backend=huggingface,tokenizer=${CKPT}/context/nemo_tokenizer,num_concurrent=${NUM_CONCURRENT},max_retries=5,tokenized_requests=False" \
+      --tasks "$task" \
+      "${WANDB_ARGS[@]}" \
+      --output_path "$RESULTS_DIR/native_${NAME}_${task}" \
+      2>&1 | tee "$RESULTS_DIR/native_${NAME}_${task}.log"; then
+    echo ">> $task OK"
+  else
+    echo "!! $task FAILED — kontynuuję pozostałe"
+    FAILED+=("$task")
+  fi
+done
+[ ${#FAILED[@]} -eq 0 ] && echo ">> wszystkie zadania OK" || echo "!! nieudane zadania: ${FAILED[*]}"
 
 echo ">> gotowe: $NAME (cleanup serwera przez trap EXIT)"
