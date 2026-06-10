@@ -1,0 +1,3 @@
+# Skrypty powłoki muszą mieć końce linii LF (uruchamiane na Linuksie/glasserze).
+*.sh text eol=lf
+*.py text eol=lf
