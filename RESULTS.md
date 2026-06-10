@@ -14,32 +14,31 @@ Trzy warunki:
 > pełnym zbiorze). Różnice pruning-only vs distilled wielokrotnie przekraczają rozjazd stacku.
 > Liczby distilled i baseline — z wcześniejszych przebiegów HF. Daty/pełne logi: serwer `glasser`.
 
-## DEPTH (28 → 20 warstw; usunięto warstwy 13–16 i 24–27)
+## Tabela główna — pruning-only vs distilled vs baseline
 
-| Zadanie | Baseline | **Pruning-only** | Distilled (40 kr.) |
-|---|---|---|---|
-| HellaSwag (acc_norm) | 0.6644 | **0.3642** | 0.2504 |
-| ARC-Challenge (acc_norm) | 0.4488 | **0.3020** | 0.2270 |
-| WinoGrande (acc) | 0.6393 | **0.5280** | 0.4957 |
-| TruthfulQA MC2 | 0.4878 | **0.4724** | NaN |
+Pruning-only: natywny eval (deploy `legacy_ckpt=True`, `max_input_len=8192`), z wandb
+(`magisterka-pruning`). Distilled: po 40 krokach, eval HF.
 
-**Wniosek (depth):** pruning-only **bije** distilled na każdym zadaniu (>20σ na HellaSwag), a
-TruthfulQA jest **skończone** (0.4724) zamiast NaN. Czyli 40-krokowa distillacja przy ustawieniach
-pod OOM (seq 512, gbs 4) **zaszkodziła** i wywołała niestabilność numeryczną — czysty pruning
-zachowuje znaczną zdolność i jest stabilny. Uszkodzenie przypisywane wcześniej pruningowi było
-artefaktem zepsutej mikro-distillacji.
-
-## WIDTH (hidden 2048→1664, FFN 6144→4224) i COMBINED (24 w., hidden 1792, FFN 4608)
-
-| Zadanie | Width pruning-only | Width distilled | Combined pruning-only | Combined distilled |
+| Zadanie | Baseline | depth p-only / distill | width p-only / distill | combined p-only / distill |
 |---|---|---|---|---|
-| HellaSwag (acc_norm) | _TBD_ | 0.2640 | _TBD_ | 0.2651 |
-| ARC-Challenge (acc_norm) | _TBD_ | 0.2585 | _TBD_ | 0.2585 |
-| WinoGrande (acc) | _TBD_ | 0.4957 | _TBD_ | 0.4957 |
-| TruthfulQA MC2 | _TBD_ | 0.4807 | _TBD_ | NaN |
+| HellaSwag (acc_norm) | 0.6644 | **0.3649** / 0.2504 | 0.2953 / 0.2640 | 0.3078 / 0.2651 |
+| ARC-Challenge (acc_norm) | 0.4488 | **0.3038** / 0.2270 | 0.2133 / 0.2585 | 0.2210 / 0.2585 |
+| WinoGrande (acc) | 0.6393 | **0.5399** / 0.4957 | 0.5012 / 0.4957 | 0.5051 / 0.4957 |
+| TruthfulQA MC2 | 0.4878 | **0.4711** / NaN | 0.4537 / 0.4807 | 0.4597 / NaN |
 
-_TBD_ = pruning-only width/combined jeszcze nie uruchomione (deploy + suite). Odtworzenie:
-`./scripts/run_pruneonly.sh /workspace/nemo_ckpts/qwen3-1.7b-base-width width 0` (analogicznie combined).
+### Wnioski
+
+1. **DEPTH (28→20 w.; usunięto 13–16, 24–27): pruning-only bije distilled na każdym zadaniu**
+   (HS +0.11, ARC +0.08, Wino +0.04; TQA skończone 0.4711 vs NaN). 40-krokowa distillacja
+   (seq 512, gbs 4, pod OOM) **zaszkodziła** i wywołała NaN — czysty pruning depth zachowuje
+   znaczną zdolność i jest stabilny.
+2. **WIDTH (1664/4224) i COMBINED (24 w., 1792/4608): obraz mieszany, oba blisko losowości.**
+   Width pruning-only ma ARC 0.2133 (poniżej losowości 0.25). Tu distillacja miejscami pomogła
+   (ARC, TQA width). „Distillacja szkodzi" jest więc tezą **specyficzną dla depth**, nie uniwersalną.
+3. **Depth pruning-only ≫ width pruning-only** (HS 0.365 vs 0.295, ARC 0.304 vs 0.213) — bez
+   retrainingu usuwanie warstw zachowuje więcej niż zwężanie. Zgodne z paperami (width > depth
+   dopiero PO retrainingu; przed — odwrotnie). Width pruning bardziej rozjeżdża aktywacje
+   (zmienia każdą warstwę), depth zostawia pozostałe warstwy nietknięte.
 
 ## Parametry wariantów (zweryfikowane)
 
